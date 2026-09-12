@@ -1,0 +1,19 @@
+# Local Python environment
+.venv/
+
+# Generated Python files
+__pycache__/
+*.py[cod]
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated packaging files
+build/
+dist/
+*.egg-info/
+
+# Local secrets
+.env
