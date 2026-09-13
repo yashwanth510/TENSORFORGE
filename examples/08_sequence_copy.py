@@ -28,14 +28,19 @@ def main():
     # Shift the target right; token 0 marks the beginning, never the answer.
     target_input = tf.cat((tf.zeros(len(source), 1, dtype=np.int64), source[:, :-1]), axis=1)
     model = CopyModel()
-    optimizer = optim.Adam(model.parameters(), lr=0.015)
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    # Warmup and decay reduce sensitivity to small CPU arithmetic differences.
+    scheduler = tf.training.LRScheduler(
+        optimizer, schedule="cosine", warmup_steps=10, total_steps=300, min_lr=0.001
+    )
     initial = nn.CrossEntropyLoss()(model(source, target_input), source).item()
-    for _ in range(180):
+    for _ in range(300):
         optimizer.zero_grad()
         loss = nn.CrossEntropyLoss()(model(source, target_input), source)
         loss.backward()
         tf.training.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        scheduler.step()
     model.eval()
     with tf.no_grad():
         final = nn.CrossEntropyLoss()(model(source, target_input), source).item()
