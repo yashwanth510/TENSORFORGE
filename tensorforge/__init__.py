@@ -1,6 +1,21 @@
 """TensorForge: CPU tensors, automatic differentiation, and neural networks."""
 
-from . import data, models, nn, optim, text, training
+from . import (
+    attention,
+    cache,
+    data,
+    distributed,
+    evaluation,
+    finetuning,
+    generation,
+    models,
+    nn,
+    optim,
+    pretrained,
+    retrieval,
+    text,
+    training,
+)
 from .scalar import Value
 from .serialization import load, save
 from .tensor import (
@@ -19,7 +34,7 @@ from .tensor import (
     zeros,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Tensor",
@@ -44,4 +59,12 @@ __all__ = [
     "where",
     "get_rng_state",
     "set_rng_state",
+    "attention",
+    "evaluation",
+    "finetuning",
+    "generation",
+    "pretrained",
+    "retrieval",
+    "distributed",
+    "cache",
 ]

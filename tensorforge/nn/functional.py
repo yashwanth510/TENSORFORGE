@@ -96,7 +96,15 @@ def log_softmax(x, axis=-1):
 
 
 def scaled_dot_product_attention(
-    query, key, value, mask=None, is_causal=False, dropout_p=0.0, training=False, query_offset=0
+    query,
+    key,
+    value,
+    mask=None,
+    is_causal=False,
+    dropout_p=0.0,
+    training=False,
+    query_offset=0,
+    bias=None,
 ):
     """Attention for (..., query_length, width) tensors.
 
@@ -116,6 +124,14 @@ def scaled_dot_product_attention(
     if not 0 <= dropout_p < 1 or type(query_offset) is not int or query_offset < 0:
         raise ValueError("Invalid dropout probability or query offset.")
     scores = (query @ key.transpose(-2, -1)) / np.sqrt(query.shape[-1])
+    if bias is not None:
+        bias = _as_tensor(bias)
+        if (
+            np.broadcast_shapes(scores.shape, bias.shape) != scores.shape
+            or not np.isfinite(bias._data).all()
+        ):
+            raise ValueError("Attention bias must be finite and broadcast to the score shape.")
+        scores = scores + bias
     blocked = np.zeros(scores.shape, dtype=bool)
     if mask is not None:
         mask = mask.numpy() if isinstance(mask, Tensor) else np.asarray(mask)

@@ -188,3 +188,60 @@ def load_checkpoint(path, model, optimizer=None, scheduler=None, loader=None):
         module.training = state["modes"][name]
     set_rng_state(state["rng"])
     return {"step": state["step"], "extra": state["extra"]}
+
+
+def checkpoint(function, *inputs, parameters=None):
+    """Recompute a pure tensor function in backward to save activation storage.
+
+    Pass captured parameters explicitly for a closure. Modules are discovered
+    automatically but modules with buffers are rejected because replaying
+    stateful forward passes needs a separate policy. Output must be one Tensor.
+    """
+    import importlib
+
+    from .tensor import Tensor, no_grad
+
+    core = importlib.import_module("tensorforge.tensor")
+    if isinstance(function, Module):
+        if function.buffers():
+            raise ValueError("Checkpointing modules with buffers is not supported.")
+        parameters = function.parameters() if parameters is None else parameters
+    parameters = tuple(() if parameters is None else parameters)
+    parents = tuple(inputs) + parameters
+    if (
+        not inputs
+        or not all(isinstance(t, Tensor) for t in parents)
+        or len({id(t) for t in parents}) != len(parents)
+    ):
+        raise ValueError("Checkpoint inputs and parameters must be distinct tensors.")
+    if any(p._parents for p in parameters):
+        raise ValueError("Captured parameters must be leaf tensors.")
+    before = get_rng_state()
+    with no_grad():
+        output = function(*inputs)
+    if not isinstance(output, Tensor):
+        raise TypeError("Checkpointed function must return one Tensor.")
+
+    def backward(g):
+        current = get_rng_state()
+        saved = [p.grad for p in parameters]
+        copies = [Tensor(x._data, requires_grad=x.requires_grad, dtype=x.dtype) for x in inputs]
+        token = core._grad_enabled.set(True)
+        try:
+            set_rng_state(before)
+            for p in parameters:
+                p.grad = None
+            replay = function(*copies)
+            replay.backward(g)
+            gradients = tuple(
+                np.zeros_like(t._data) if t.grad is None else t.grad.copy()
+                for t in (*copies, *parameters)
+            )
+        finally:
+            for p, grad in zip(parameters, saved):
+                p.grad = grad
+            set_rng_state(current)
+            core._grad_enabled.reset(token)
+        return gradients
+
+    return Tensor._op(output._data, parents, backward)

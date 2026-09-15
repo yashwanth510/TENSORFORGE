@@ -87,3 +87,19 @@ __all__ = [
     "TransformerDecoder",
     "Transformer",
 ]
+
+from .advanced import (
+    MaskedLanguageModel,
+    MixtureOfExperts,
+    MultimodalClassifier,
+    PatchEmbedding,
+    VisionTransformer,
+)
+
+__all__ += [
+    "MaskedLanguageModel",
+    "PatchEmbedding",
+    "VisionTransformer",
+    "MultimodalClassifier",
+    "MixtureOfExperts",
+]

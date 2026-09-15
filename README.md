@@ -30,9 +30,12 @@ The library does not depend on PyTorch, TensorFlow, or JAX.
 | Position and feed-forward layers | Sinusoidal/learned positions, RoPE, GELU, SwiGLU, LayerNorm, RMSNorm |
 | Language models | GPT-style and modern decoder configurations, tied embeddings, cached generation |
 | Training | Losses, SGD, Adam, AdamW, clipping, warmup, step/cosine schedules, batching |
+| Fine-tuning | Masked-token recovery, instruction targets, LoRA, adapters, DPO and reward-ranking losses |
+| Extended models | Vision Transformers, joint image/text classifiers, token-routed experts |
+| CPU experiments | Tiled attention, position biases, gradient checkpointing, int8 weight storage, local process replicas |
 | Storage | Model/buffer state, optimizer/scheduler state, random state, loader progress, tokenizer/config metadata |
 
-Version **0.1.0** supports small models and CPU experimentation. It is an
+Version **0.2.0** supports small models and CPU experimentation. It is an
 independent implementation with a limited API, not a drop-in PyTorch replacement.
 
 ## Installation
@@ -225,7 +228,7 @@ python examples/09_language_model.py --text-file /path/to/text.txt --steps 500 -
 python examples/09_language_model.py --load checkpoints/modern.npz --prompt 'hello '
 ```
 
-The tokenizer is character based, with pad, beginning, end, and unknown tokens.
+This example uses the character tokenizer, with pad, beginning, end, and unknown tokens.
 It is deterministic and serializable. The examples train small models; they
 are workflow checks, not demonstrations of general-purpose language ability.
 
@@ -334,10 +337,157 @@ Run examples from the repository after installing the package:
 | [08_sequence_copy.py](examples/08_sequence_copy.py) | Encoder–decoder training and autoregressive copying |
 | [09_language_model.py](examples/09_language_model.py) | GPT/modern decoder training, saving, and generation |
 | [10_checkpoint.py](examples/10_checkpoint.py) | Restoring model and optimizer state |
+| [11_masked_language_model.py](examples/11_masked_language_model.py) | Bidirectional masked-token training |
+| [12_preference_training.py](examples/12_preference_training.py) | DPO with LoRA on a causal model |
+| [13_vision_transformer.py](examples/13_vision_transformer.py) | Training a patch-based image model |
 
 Every default example includes checks for its expected behavior. Training
 accuracy on tiny generated datasets validates the implementation, not
 performance on unseen data.
+
+## Advanced CPU features in 0.2
+
+These additions are working reference implementations for small workloads.
+The table distinguishes implemented features from larger systems still absent.
+
+| Area | Available now | Remaining limits |
+| --- | --- | --- |
+| Masked/denoising training | `nn.MaskedLanguageModel`, `mask_tokens`, sentinel span corruption | No pretrained BERT compatibility or large pretraining run |
+| Subword tokenization | UTF-8 `BytePairTokenizer`, byte fallback, saved merge tables | No WordPiece, Unigram, or third-party tokenizer import |
+| Paired/instruction data | `PairedTextDataset`, `instruction_sample` with ignored prompt labels | Supply your own translation/instruction corpus |
+| Model bundles | `save_pretrained` / `from_pretrained` for native TensorForge causal models | No Hugging Face/OpenAI weight conversion |
+| Fine-tuning | Freeze helpers, LoRA insertion/merging, bottleneck adapters | No QLoRA or third-party PEFT checkpoint compatibility |
+| Preferences | DPO, reward ranking, fixed-advantage policy-gradient loss | No complete PPO/RLHF trainer, reward-data collection, or rollout service |
+| Models | Vision Transformer, joint image/text classifier, sparse top-k experts | No pretrained multimodal model or distributed expert placement |
+| Positions | ALiBi, learned clipped relative bias, linear rotary-position scaling | No claim of validated long-context model quality |
+| Attention | Exact CPU query tiling with backward recomputation; causal local windows | No fused CUDA FlashAttention or general sparse-kernel library |
+| Decoding | Beam search, repetition penalty, allowed-token constraints, greedy speculative verification | One prompt per search call; no stochastic speculative sampler |
+| Caches | Paged CPU storage, request IDs, explicit eviction and release | Storage utility is not integrated into an HTTP server or automatic model-cache eviction |
+| Memory | Activation checkpointing for pure functions/stateless modules; int8 Linear weight storage | No AMP, GPU integer kernels, or whole-model compiler |
+| Parallel work | Synchronous local CPU data-parallel gradients using worker processes | No multi-node, GPU/model parallelism, or optimizer-state sharding |
+| Evaluation | Token-weighted validation loss, perplexity, classification accuracy | No external benchmark suite or quality claims |
+| Retrieval | Local TF-IDF document search, prompt assembly, optional model generation | No embedding service, vector database, or production RAG service |
+
+### Byte-pair tokenization
+
+```python
+from tensorforge.text import BytePairTokenizer
+
+text = "hello tensorforge. " * 20
+tokenizer = BytePairTokenizer(text, vocab_size=300)
+ids = tokenizer.encode("hello 🌍")
+assert tokenizer.decode(ids) == "hello 🌍"
+```
+
+IDs 0–3 are special tokens, followed by 256 byte tokens and learned merges.
+The requested vocabulary is a maximum: training stops if no pair occurs often
+enough. A full UTF-8 encoding round-trips; an incomplete byte sequence produced
+by a model decodes with replacement characters. This is a native tokenizer
+format, not a reproduction of GPT-2's tokenizer.
+
+### LoRA and preference learning
+
+```python
+from tensorforge.finetuning import apply_lora, trainable_parameters
+
+# Use an existing CausalLanguageModel called model.
+apply_lora(model, rank=4, alpha=8, target_names=("q_proj", "v_proj"))
+optimizer = tf.optim.Adam(trainable_parameters(model), lr=0.001)
+```
+
+`apply_lora` freezes the base model and creates trainable low-rank updates.
+Use `merge_lora(model)` for a merged inference model. `Adapter` is a separate
+residual bottleneck layer that can be added to a custom model.
+
+`sequence_log_probs` extracts summed response-token log probabilities.
+`dpo_loss` compares chosen and rejected scores against detached reference
+scores. `reward_ranking_loss` trains scalar preference scores;
+`policy_gradient_loss` implements the fixed-advantage REINFORCE objective.
+These functions are not a complete PPO/RLHF system. The runnable preference
+example demonstrates a small DPO update using LoRA.
+
+### Tiled attention and position biases
+
+```python
+from tensorforge.attention import memory_efficient_attention, alibi_bias
+from tensorforge.nn.functional import scaled_dot_product_attention
+
+q, k, v = tf.randn(1, 2, 16, 8), tf.randn(1, 2, 16, 8), tf.randn(1, 2, 16, 8)
+out = memory_efficient_attention(q, k, v, block_size=4, is_causal=True, window_size=8)
+biased = scaled_dot_product_attention(q, k, v, is_causal=True, bias=alibi_bias(2, 16))
+```
+
+The tiled path has matching leading batch/head shapes and no dropout or
+learned bias argument. It computes exact scores a query block at a time and
+recomputes probabilities during backward. Supplying a dense mask still uses
+memory for that mask. The default model attention path remains dense.
+`MultiheadAttention` accepts an `attention_bias` tensor. `RelativePositionBias`
+is learned; `RotaryEmbedding(..., scale=2)` linearly interpolates positions.
+Changing position scaling alone does not demonstrate improved long-context quality.
+
+### Generation and model bundles
+
+```python
+from tensorforge.generation import beam_search, speculative_greedy
+from tensorforge.pretrained import save_pretrained, from_pretrained
+
+# model and tokenizer must have the same vocabulary.
+save_pretrained(model, "model.npz", tokenizer)
+restored, restored_tokenizer = from_pretrained("model.npz")
+result = beam_search(restored, [[1]], max_new_tokens=4, num_beams=3)
+```
+
+Bundle saving supports native unwrapped causal models; merge LoRA wrappers
+first, or use the generic training checkpoint API for adapter state. Loading
+starts in evaluation mode. No third-party model weights are downloaded.
+Beam search accepts `repetition_penalty`, `eos_token_id`, and an
+`allowed_tokens_fn(prefix)` returning allowed IDs. `speculative_greedy` verifies
+a draft block against a target model and matches the target's greedy output.
+It requires identical vocabulary meanings and does not guarantee a speedup.
+
+### Checkpointing, quantization, and local parallel work
+
+`training.checkpoint(function, *inputs, parameters=...)` drops forward graph
+storage and replays the function during backward. Pass captured parameters
+explicitly for closures. Module parameters are discovered automatically;
+modules with buffers are rejected to avoid replaying stateful updates.
+TensorForge's random state is preserved during replay. Arbitrary external
+side effects or external random generators are not supported.
+
+`finetuning.QuantizedLinear(linear)` stores per-output-channel int8 weights and
+floating scales, then dequantizes for NumPy computation. It reduces stored
+weight size; it is not an accelerated integer-compute backend.
+
+`distributed.data_parallel_backward(model, batches, loss_fn, workers=2)`
+computes mean-loss gradients in local processes and combines them by sample
+count. Call `optimizer.step()` in the parent process afterward. Models and
+loss functions must be importable/picklable; use a main guard in scripts.
+Non-batch shapes must match, and losses must have equal per-sample
+normalization. State-changing buffers and uneven masked-token normalization
+are unsupported. No remote machines or MPI installation are required.
+
+`cache.PagedKVCache` stores per-request `(heads, time, head_dim)` entries.
+`get` returns keys, values, and absolute positions. `evict(keep_last=...)`
+releases old pages; `release` removes a request. Access is single-threaded,
+and callers must use the returned absolute positions correctly when connecting
+an evicted cache to rotary attention. It is not a replacement for the model's
+existing cache tuples.
+
+### Validation and retrieval
+
+`evaluation.evaluate_language_model(model, batches)` reports token-weighted
+loss and perplexity while restoring previous module modes. Supply held-out
+batches; evaluating training batches does not measure generalization.
+
+`retrieval.DocumentIndex({id: text, ...})` performs local TF-IDF retrieval.
+`search` returns source IDs/text/scores; `prompt` constructs a source-labelled
+prompt; `generate` passes it to a compatible model/tokenizer. Context must fit
+the model. Retrieval does not make a tiny untrained model answer reliably.
+
+Algorithm references: [LoRA](https://arxiv.org/abs/2106.09685),
+[DPO](https://arxiv.org/abs/2305.18290), [ALiBi](https://arxiv.org/abs/2108.12409).
+The CPU attention experiment is not an implementation of the GPU kernels in
+[FlashAttention](https://arxiv.org/abs/2205.14135).
 
 ## API reference
 
@@ -441,15 +591,15 @@ python -m pytest tests/test_examples.py -rP
 Build outputs:
 
 ```text
-dist/tensorforge-0.1.0-py3-none-any.whl
-dist/tensorforge-0.1.0.tar.gz
+dist/tensorforge-0.2.0-py3-none-any.whl
+dist/tensorforge-0.2.0.tar.gz
 ```
 
 The wheel contains the library. The source archive also includes examples and
 tests. Install the wheel in another environment with:
 
 ```bash
-python -m pip install /absolute/path/to/dist/tensorforge-0.1.0-py3-none-any.whl
+python -m pip install /absolute/path/to/dist/tensorforge-0.2.0-py3-none-any.whl
 ```
 
 GitHub Actions checks Python 3.10, 3.11, and 3.12. Local verification results
@@ -467,11 +617,20 @@ tensorforge/
     vision.py        Convolution and pooling
     recurrent.py     RNN, LSTM, and GRU
     transformer.py   Position layers, attention, and Transformer blocks
+    advanced.py      Masked language models, vision, multimodal, and experts
   models.py          Causal language models and generation
   optim.py           Parameter update rules
   training.py        Schedules, clipping, and training checkpoints
   data.py            Datasets, batching, and padding
-  text.py            Character tokenizer and text windows
+  text.py            Tokenizers and language-training data
+  attention.py       Tiled attention and relative position biases
+  finetuning.py      LoRA, adapters, preference losses, and int8 weight storage
+  generation.py      Beam search and greedy speculative decoding
+  cache.py           Paged CPU key/value storage
+  pretrained.py      Native model and tokenizer bundles
+  evaluation.py      Language loss, perplexity, and accuracy
+  retrieval.py       Local document search and retrieval prompts
+  distributed.py     Local CPU replica gradients
   serialization.py   Portable state files
 examples/            Numbered runnable examples
 tests/               Automated checks
@@ -480,7 +639,7 @@ tests/               Automated checks
 
 ## Scope and limitations
 
-- CPU/NumPy backend only. No CUDA, distributed training, automatic mixed
+- CPU/NumPy backend only. No CUDA, multi-machine training, automatic mixed
   precision, graph compilation, sparse tensors, or optimized custom kernels.
 - Designed for small models. No throughput, production-readiness, or
   billion-parameter training claim.
@@ -504,12 +663,14 @@ tests/               Automated checks
   requires positive inputs. ReLU/absolute value use zero gradient at zero;
   maximum reductions share ties, while max pooling chooses the first tie.
 - No convolution groups/dilation, transposed convolution, recurrent packed
-  sequences, multi-process loading, or pretrained model import.
+  sequences, multi-process loading, or external pretrained weight import.
 - Attention uses a dense score matrix, so memory grows quadratically with
-  sequence length. Cache use is inference-only. No FlashAttention or sliding
-  window cache eviction.
-- Tokenization is character based, not BPE. Model/tokenizer architecture
-  metadata must be saved explicitly when using generic checkpoint functions.
+  sequence length in the default dense implementation. The optional tiled CPU
+  function bounds score storage by query block size. It is not a CUDA
+  FlashAttention kernel. Cache use is inference-only.
+- Character and byte-pair tokenizers are available. WordPiece and Unigram
+  tokenizers are not implemented. Model/tokenizer architecture metadata must
+  be saved explicitly when using generic checkpoint functions.
 
 ## Contributing
 

@@ -68,18 +68,23 @@ class LearnedPositionEncoding(Module):
 class RotaryEmbedding(Module):
     """Rotate adjacent feature pairs using their absolute token positions."""
 
-    def __init__(self, head_dim, base=10000.0):
+    def __init__(self, head_dim, base=10000.0, scale=1.0):
         super().__init__()
         _positive_int(head_dim, "head_dim")
         if head_dim % 2 or not np.isfinite(base) or base <= 0:
             raise ValueError("RoPE requires even head_dim and a finite positive base.")
         self.head_dim = head_dim
+        if not np.isfinite(scale) or scale < 1:
+            raise ValueError("Rotary position scale must be finite and at least one.")
+        self.scale = float(scale)
         self.register_buffer("frequencies", Tensor(base ** (-np.arange(0, head_dim, 2) / head_dim)))
 
     def forward(self, x, offset=0):
         if x.ndim != 4 or x.shape[-1] != self.head_dim or type(offset) is not int or offset < 0:
             raise ValueError("RoPE expects (batch, heads, time, head_dim) and nonnegative offset.")
-        angles = np.arange(offset, offset + x.shape[-2])[:, None] * self.frequencies._data
+        angles = (
+            np.arange(offset, offset + x.shape[-2])[:, None] * self.frequencies._data / self.scale
+        )
         cosine, sine = Tensor(np.cos(angles)), Tensor(np.sin(angles))
         even, odd = x[..., 0::2], x[..., 1::2]
         return stack((even * cosine - odd * sine, even * sine + odd * cosine), axis=-1).reshape(
@@ -124,6 +129,7 @@ class MultiheadAttention(Module):
         is_causal=False,
         cache=None,
         use_cache=False,
+        attention_bias=None,
     ):
         self_attention = key is None and value is None
         key = query if key is None else key
@@ -195,7 +201,7 @@ class MultiheadAttention(Module):
                     raise TypeError("Attention masks must be boolean.")
                 mask = mask | padding
         result = scaled_dot_product_attention(
-            q, k, v, mask, is_causal, self.dropout.p, self.training, offset
+            q, k, v, mask, is_causal, self.dropout.p, self.training, offset, attention_bias
         )
         result = result.transpose(1, 2).reshape(batch, query.shape[1], self.embed_dim)
         result = self.out_proj(result)
