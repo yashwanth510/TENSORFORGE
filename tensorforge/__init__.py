@@ -1,18 +1,12 @@
 """TensorForge: CPU tensors, automatic differentiation, and neural networks."""
 
 from . import (
-    attention,
-    cache,
     data,
-    distributed,
     evaluation,
-    finetuning,
-    generation,
     models,
     nn,
     optim,
     pretrained,
-    retrieval,
     text,
     training,
 )
@@ -34,7 +28,7 @@ from .tensor import (
     zeros,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Tensor",
@@ -59,12 +53,6 @@ __all__ = [
     "where",
     "get_rng_state",
     "set_rng_state",
-    "attention",
     "evaluation",
-    "finetuning",
-    "generation",
     "pretrained",
-    "retrieval",
-    "distributed",
-    "cache",
 ]

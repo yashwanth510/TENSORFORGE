@@ -6,12 +6,8 @@ from .text import BytePairTokenizer, CharacterTokenizer
 
 
 def save_pretrained(model, path, tokenizer=None):
-    from .finetuning import LoRALinear
-
     if not isinstance(model, CausalLanguageModel):
         raise TypeError("Model bundles currently support CausalLanguageModel.")
-    if any(isinstance(layer, LoRALinear) for _, layer in model._walk()):
-        raise ValueError("Merge LoRA layers before saving a native model bundle.")
     if tokenizer is not None and not isinstance(tokenizer, (CharacterTokenizer, BytePairTokenizer)):
         raise TypeError("Unsupported tokenizer type.")
     if tokenizer is not None and tokenizer.vocab_size != model.config.vocab_size:

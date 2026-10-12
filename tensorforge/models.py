@@ -82,6 +82,17 @@ class CausalLanguageModel(Module):
         self.norm = RMSNorm(config.features) if modern else LayerNorm(config.features)
 
     def forward(self, tokens, padding_mask=None, cache=None, use_cache=False):
+        result = self.hidden_states(tokens, padding_mask, cache, use_cache)
+        if use_cache:
+            hidden, updated = result
+            return hidden @ self.embedding.weight.T, updated
+        return result @ self.embedding.weight.T
+
+    def hidden_states(self, tokens, padding_mask=None, cache=None, use_cache=False):
+        """Final normalized token features, before the tied vocabulary projection.
+
+        Cache behavior matches forward.
+        """
         if not isinstance(tokens, Tensor):
             raw = np.asarray(tokens)
             if raw.dtype.kind not in "iu":
@@ -119,8 +130,8 @@ class CausalLanguageModel(Module):
                 updated.append(pair)
             else:
                 x = result
-        logits = self.norm(x) @ self.embedding.weight.T
-        return (logits, updated) if use_cache else logits
+        hidden = self.norm(x)
+        return (hidden, updated) if use_cache else hidden
 
     def generate(
         self,

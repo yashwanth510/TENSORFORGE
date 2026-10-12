@@ -11,13 +11,14 @@ import tensorforge as tf
 from tensorforge import nn, optim
 from tensorforge.data import DataLoader
 from tensorforge.models import CausalLanguageModel, LanguageModelConfig
-from tensorforge.text import CharacterTokenizer, TextDataset
+from tensorforge.text import BytePairTokenizer, CharacterTokenizer, TextDataset
 from tensorforge.training import LRScheduler, clip_grad_norm_, save_checkpoint
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", choices=("gpt", "modern"), default="gpt")
+    parser.add_argument("--tokenizer", choices=("character", "bpe"), default="character")
     parser.add_argument(
         "--text-file", type=Path, help="UTF-8 training text; defaults to a tiny built-in sample"
     )
@@ -36,7 +37,8 @@ def main():
     if args.load:
         state = tf.load(args.load)
         extra = state["extra"]
-        tokenizer = CharacterTokenizer.from_state_dict(extra["tokenizer"])
+        tokenizer_types = {"character": CharacterTokenizer, "byte_pair": BytePairTokenizer}
+        tokenizer = tokenizer_types[extra["tokenizer"]["type"]].from_state_dict(extra["tokenizer"])
         model = CausalLanguageModel(LanguageModelConfig(**extra["config"]))
         model.load_state_dict(state["model"])
     else:
@@ -49,9 +51,14 @@ def main():
         )
         if len(text) < 3:
             parser.error("training text must contain at least three characters")
-        tokenizer = CharacterTokenizer(text)
-        sequence_length = min(32, len(text) - 1)
-        dataset = TextDataset(tokenizer.encode(text, add_eos=True), sequence_length)
+        tokenizer = (
+            CharacterTokenizer(text)
+            if args.tokenizer == "character"
+            else BytePairTokenizer(text, vocab_size=280)
+        )
+        token_ids = tokenizer.encode(text, add_eos=True)
+        sequence_length = min(32, len(token_ids) - 1)
+        dataset = TextDataset(token_ids, sequence_length)
         loader = DataLoader(dataset, batch_size=8, shuffle=True, seed=21)
         config = LanguageModelConfig(
             tokenizer.vocab_size,

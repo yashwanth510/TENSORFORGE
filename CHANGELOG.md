@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.0 — 2026-10-12
+
+- Focused the library on tensors/autograd, dense and convolutional networks,
+  RNN/LSTM/GRU, Transformers, causal language models, and core training tools.
+- Retained character and byte-pair tokenization, cached sampling, evaluation,
+  native model bundles, and resumable training checkpoints.
+- Removed experimental attention and position biases, paged cache storage,
+  beam/speculative decoding, activation checkpointing, quantization, process
+  replicas, retrieval, masked/denoising training, instruction/paired data,
+  LoRA/adapters/preference objectives, vision/multimodal Transformers, and experts.
+- Added character/BPE selection and tokenizer restoration to the language-model example.
+- These API removals break compatibility with code using those features.
+
 ## 0.2.0 — 2026-09-15
 
 - Added byte-pair tokenization, masked/span corruption, and paired/instruction data.

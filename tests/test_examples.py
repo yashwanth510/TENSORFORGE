@@ -20,7 +20,8 @@ def test_example(path):
     print(completed.stdout)
 
 
-def test_modern_language_model(tmp_path):
+@pytest.mark.parametrize("tokenizer", ["character", "bpe"])
+def test_modern_language_model(tmp_path, tokenizer):
     checkpoint = tmp_path / "modern.npz"
     completed = subprocess.run(
         [
@@ -28,6 +29,8 @@ def test_modern_language_model(tmp_path):
             str(ROOT / "examples/09_language_model.py"),
             "--variant",
             "modern",
+            "--tokenizer",
+            tokenizer,
             "--checkpoint",
             str(checkpoint),
         ],
