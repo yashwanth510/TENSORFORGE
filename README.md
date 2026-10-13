@@ -12,10 +12,13 @@ readable codebase.
 
 NumPy handles array storage and computation. TensorForge implements the
 computation graph, derivatives, layers, optimizers, and model architectures.
-The library does not depend on PyTorch, TensorFlow, or JAX.
+The runtime depends only on NumPy. Optional tests compare outputs and
+gradients against PyTorch reference implementations.
 
 [Installation](#installation) · [Quick start](#quick-start) ·
-[Transformers](#transformers) · [Examples](#examples) ·
+[CNNs and recurrent networks](#cnns-and-recurrent-networks) ·
+[Transformers](#transformers) · [Tokenization](#tokenization-model-storage-and-evaluation) ·
+[Examples](#examples) ·
 [API](#api-reference) · [Testing](#testing-and-packaging) ·
 [Limitations](#scope-and-limitations)
 
@@ -24,7 +27,7 @@ The library does not depend on PyTorch, TensorFlow, or JAX.
 | Component | Included |
 | --- | --- |
 | Tensors | Broadcasting, indexing, matrix multiplication, reductions, shape operations, concatenation, stacking, masking |
-| Autograd | First-order reverse-mode differentiation, gradient accumulation, detach, gradient-free inference |
+| Autograd | Independent scalar engine plus first-order reverse-mode differentiation, gradient accumulation, detach, gradient-free inference |
 | Networks | Dense layers, convolution, pooling, RNN, LSTM, GRU, embeddings, dropout, normalization |
 | Transformers | Encoder, decoder, encoder–decoder, self/cross-attention, grouped-query attention, causal/padding masks |
 | Position and feed-forward layers | Sinusoidal/learned positions, RoPE, GELU, SwiGLU, LayerNorm, RMSNorm |
@@ -32,10 +35,12 @@ The library does not depend on PyTorch, TensorFlow, or JAX.
 | Training | Losses, SGD, Adam, AdamW, clipping, warmup, step/cosine schedules, batching |
 | Tokenization | Character and UTF-8 byte-pair tokenizers, saved vocabulary and merge rules |
 | Evaluation | Token-weighted loss, perplexity, classification accuracy |
-| Storage | Model/buffer state, optimizer/scheduler state, random state, loader progress, tokenizer/config metadata |
+| Storage | Model/buffer state, optimizer/scheduler state, random state, loader progress, native model/tokenizer bundles |
+| Validation | Independent finite differences and optional PyTorch output, loss, gradient, and optimizer comparisons |
 
 Version **0.3.0** supports small models and CPU experimentation. It is an
-independent implementation with a limited API, not a drop-in PyTorch replacement.
+independent implementation focused on core neural-network concepts. See
+[CHANGELOG.md](CHANGELOG.md) for the features removed since 0.2.0.
 
 ## Installation
 
@@ -54,15 +59,45 @@ On Windows PowerShell, activation is `.venv\Scripts\Activate.ps1`.
 To install runtime dependencies only, use `python -m pip install .`.
 
 - Runtime: `numpy>=1.24,<3`.
-- Development: pytest, build, and Ruff, as declared in `pyproject.toml`.
+- Development (`dev` extra): pytest, build, and Ruff.
+- Reference validation (`reference` extra): `torch>=2.5,<3`; see the
+  [CPU installation commands](#pytorch-reference-comparisons).
 - `-e` installs the source in editable mode.
 - No GPU toolchain or downloaded dataset is required.
 
-This project's package name is `tensorforge`. It is distributed through this
-repository and locally built packages; **this release is not published to
-PyPI**. A similarly named package elsewhere may be unrelated.
+Install this project from this repository or its locally built wheel. The
+package name is `tensorforge`; the commands above install this checkout.
+
+## How the framework works
+
+A forward pass builds a graph of Tensor operations. Each operation supplies
+its own vector–Jacobian product, and `backward()` applies the chain rule in
+reverse graph order. Shared paths accumulate gradients; broadcasted operands
+receive gradients reduced to their original shapes. Optimizers update leaf
+parameters after backpropagation. Version counters reject a backward pass
+through a graph whose inputs have since been updated.
+
+`Value` is an independent scalar engine for learning these ideas before
+moving to tensors. Layers compose tensor operations; convolution, pooling,
+and certain losses also provide explicit derivatives. Transformer blocks
+combine embeddings, normalization, attention, residual paths, and feed-forward
+layers. The library records gradients automatically using these derivatives.
 
 ## Quick start
+
+### Start with scalar backpropagation
+
+```python
+from tensorforge import Value
+
+a, b = Value(2), Value(3)
+loss = a * b + a
+loss.backward()
+assert (loss.data, a.grad, b.grad) == (8.0, 4.0, 2.0)
+```
+
+`Value.backward()` resets its graph's gradients on each call. Tensor gradients
+accumulate across calls until cleared with `zero_grad()`.
 
 ### Differentiate a tensor expression
 
@@ -125,6 +160,60 @@ Parameters and child modules are discovered automatically, including modules
 inside lists, tuples, `ModuleList`, `ModuleDict`, and ordinary dictionaries.
 Shared parameters are returned once. Use `register_buffer(name, tensor)` for
 persistent non-trainable state.
+
+## CNNs and recurrent networks
+
+### Convolutional networks
+
+Images use `(batch, channels, height, width)` (NCHW). This example maps an
+8×8 image to two class logits:
+
+```python
+import tensorforge as tf
+from tensorforge import nn
+
+cnn = nn.Sequential(
+    nn.Conv2d(1, 4, kernel_size=3, padding=1),
+    nn.ReLU(),
+    nn.MaxPool2d(2),
+    nn.Flatten(),
+    nn.Linear(4 * 4 * 4, 2),
+)
+images = tf.randn(3, 1, 8, 8)
+assert cnn(images).shape == (3, 2)
+```
+
+`AvgPool2d` is also available. Convolution and pooling support square integer
+kernels and integer strides; convolution supports zero padding.
+[Example 05](examples/05_image_classifier.py) trains on synthetic image patterns.
+
+### RNN, LSTM, and GRU
+
+Recurrent inputs use `(batch, time, input_size)`. Each layer returns the entire
+output sequence and its final state. RNN uses tanh recurrence, LSTM maintains
+hidden and cell states with four gates, and GRU uses reset/update gates.
+
+```python
+import tensorforge as tf
+from tensorforge import nn
+
+sequence = tf.randn(2, 5, 3)
+rnn_output, rnn_hidden = nn.RNN(3, 4)(sequence)
+gru_output, gru_hidden = nn.GRU(3, 4)(sequence)
+lstm = nn.LSTM(3, 4)
+lstm_output, (hidden, cell) = lstm(sequence)
+assert lstm_output.shape == (2, 5, 4)
+assert hidden.shape == cell.shape == (2, 4)
+
+# Continue the same sequence using the previous chunk's state.
+first, state = lstm(sequence[:, :2])
+second, state = lstm(sequence[:, 2:], state)
+```
+
+Gradients flow through recurrent steps and supplied states. Use detached states
+when intentionally cutting the graph between chunks. Layers are single-layer
+and unidirectional; compose modules for deeper networks. See
+[example 06](examples/06_recurrent.py) for training all three recurrent types.
 
 ## Transformers
 
@@ -189,6 +278,29 @@ generated = model.generate(
 | `variant="gpt"` | Learned embeddings | LayerNorm | GELU | Multi-head or grouped-query |
 | `variant="modern"` | Rotary embeddings | RMSNorm | SwiGLU | Multi-head or grouped-query |
 
+`model.hidden_states(tokens)` returns the final normalized features shaped
+`(batch, time, features)` before the vocabulary projection. Like `forward`,
+it accepts `padding_mask`, `cache`, and `use_cache`; enabling the cache returns
+`(hidden, updated_cache)`. `forward` returns vocabulary logits instead.
+
+`LanguageModelConfig` accepts the following fields:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `vocab_size` | Required | Number of valid token IDs |
+| `features` | `64` | Token feature width |
+| `num_heads` | `4` | Query attention heads |
+| `num_layers` | `2` | Causal Transformer blocks |
+| `hidden_size` | `128` | Feed-forward hidden width |
+| `max_length` | `256` | Maximum prompt plus generated/cached sequence length |
+| `dropout` | `0.0` | Training dropout probability |
+| `variant` | `"gpt"` | GPT-style or `"modern"` decoder recipe |
+| `num_kv_heads` | `None` | Key/value heads; defaults to the query head count |
+
+Feature width must be divisible by query heads, and query heads must be
+divisible by key/value heads. Modern rotary attention requires an even head
+width. `config.to_dict()` produces metadata for saving the configuration.
+
 Both configurations use pre-normalized residual blocks and tied input/output
 embeddings. The modern option implements common modern decoder building
 blocks; it does not load pretrained Llama weights or claim model compatibility.
@@ -197,6 +309,9 @@ Generation supports greedy decoding (`temperature=0`), temperature sampling,
 top-k, top-p, an optional end token, and a key/value cache. Prompts must be
 nonempty, unpadded integer batches. Prompt plus requested output must fit
 `max_length`. Generation restores the model's previous training modes.
+The returned integer tensor includes the prompt. With `seed` supplied,
+sampling uses a local RNG. Finished batch items receive end tokens until
+all items finish or the token budget is exhausted.
 
 For direct cache use, enter `no_grad()` after `eval()`:
 
@@ -232,17 +347,39 @@ python examples/09_language_model.py --load checkpoints/modern.npz --prompt 'hel
 
 This example defaults to character tokenization; `--tokenizer bpe` selects
 UTF-8 byte-pair tokenization. Both use pad, beginning, end, and unknown tokens
-and support deterministic saved state. Loading restores the saved tokenizer. The examples train small models; they
-are workflow checks, not demonstrations of general-purpose language ability.
+and support deterministic saved state. Loading restores the saved tokenizer.
+The examples train small models to verify training workflows.
+
+| Script option | Default | Behavior |
+| --- | --- | --- |
+| `--variant` | `gpt` | Select `gpt` or `modern` when training |
+| `--tokenizer` | `character` | Select `character` or `bpe` when training |
+| `--text-file` | Built-in sample | Read local UTF-8 training text |
+| `--steps` | `120` | Number of optimizer updates |
+| `--checkpoint` | None | Save model and training state to the supplied path |
+| `--load` | None | Load saved model/config/tokenizer for generation |
+| `--prompt` | `hello ` | Text to begin generation |
+| `--new-tokens` | `24` | Maximum generated token count |
+
+The script uses greedy generation. `--load` performs inference; it does not
+resume training. To resume optimizer/scheduler/loader state in a training loop,
+use `training.load_checkpoint` as shown below.
 
 ## Training and checkpoints
 
 ### Batches and schedules
 
 ```python
+import tensorforge as tf
+from tensorforge import nn, optim
 from tensorforge.data import TensorDataset, DataLoader
 from tensorforge.training import LRScheduler, clip_grad_norm_
 
+x = tf.tensor([[0.0], [1.0], [2.0]])
+y = 2 * x + 1
+model = nn.Linear(1, 1)
+optimizer = optim.Adam(model.parameters(), lr=0.02)
+criterion = nn.MSELoss()
 loader = DataLoader(TensorDataset(x, y), batch_size=2, shuffle=True, seed=7)
 scheduler = LRScheduler(
     optimizer,
@@ -260,9 +397,8 @@ for features, targets in loader:
     scheduler.step()
 ```
 
-This fragment uses the regression `x`, `y`, `model`, `optimizer`, and
-`criterion` from the neural-network example. Constructing a scheduler sets
-the rate for the first update. Call `scheduler.step()` after each optimizer
+Constructing a scheduler sets the rate for the first update.
+Call `scheduler.step()` after each optimizer
 update. Supported schedules are `constant`, `step`, and `cosine`, with optional
 warmup.
 
@@ -303,7 +439,9 @@ progress = load_checkpoint(
 print(progress["step"])
 ```
 
-Save at an optimizer-update boundary after using all accumulated gradients.
+This save/resume fragment reuses the model, optimizer, scheduler, and loader
+from the batching example. Save at an optimizer-update boundary after using
+all accumulated gradients.
 Checkpoints contain model parameters, buffers, module modes, TensorForge random
 state, and the supplied optimizer, scheduler, and loader states. Use `extra`
 for model configuration, tokenizer state, and other plain metadata.
@@ -347,6 +485,14 @@ performance on unseen data.
 
 ## Tokenization, model storage, and evaluation
 
+### Character tokenization
+
+`CharacterTokenizer(text)` builds a sorted character vocabulary from local
+text. IDs 0–3 are pad, beginning, end, and unknown tokens; unseen characters
+encode to the unknown ID. Both tokenizers expose `vocab_size`, `encode`,
+`decode`, `state_dict`, and `from_state_dict`. `encode` can add beginning/end
+tokens, and `decode` skips special tokens by default.
+
 ### Byte-pair tokenization
 
 ```python
@@ -363,20 +509,46 @@ byte tokens and learned merges. The requested vocabulary is a maximum;
 training stops when no pair meets the frequency threshold. Byte fallback
 supports unseen characters. Complete UTF-8 sequences round-trip; incomplete
 byte sequences generated by a model decode with replacement characters.
-Both character and byte-pair tokenizers support saved state and `TextDataset`.
+BPE requires `vocab_size >= 260` and a positive `min_frequency` (default 2).
+
+`TextDataset(token_ids, sequence_length, stride=None)` creates fixed-length
+next-token windows. Inputs and targets have the same length, with targets
+shifted one token forward. The default stride equals the sequence length.
+
+```python
+from tensorforge.text import BytePairTokenizer, TextDataset
+from tensorforge.data import DataLoader
+
+text = "hello tensorforge. " * 20
+tokenizer = BytePairTokenizer(text, vocab_size=280)
+token_ids = tokenizer.encode(text, add_eos=True)
+sequence_length = min(8, len(token_ids) - 1)
+dataset = TextDataset(token_ids, sequence_length=sequence_length)
+batches = DataLoader(dataset, batch_size=2, shuffle=True, seed=7)
+inputs, targets = next(iter(batches))
+assert inputs.shape == targets.shape
+assert inputs.shape[1] == sequence_length
+```
 
 ### Native model bundles
 
 ```python
+from tensorforge.models import CausalLanguageModel, LanguageModelConfig
 from tensorforge.pretrained import save_pretrained, from_pretrained
+from tensorforge.text import CharacterTokenizer
 
+tokenizer = CharacterTokenizer("hello tensorforge.")
+model = CausalLanguageModel(LanguageModelConfig(tokenizer.vocab_size))
 save_pretrained(model, "model.npz", tokenizer)
 restored, restored_tokenizer = from_pretrained("model.npz")
 ```
 
 The model and tokenizer must have matching vocabulary sizes. Bundles store
 native causal-model configuration, weights, and optional tokenizer state.
-Loading returns a model in evaluation mode. No external weights are imported.
+Loading returns `(model, tokenizer_or_none)` with the model in evaluation
+mode. Native bundles contain the architecture configuration; generic training
+checkpoints require you to recreate the architecture. Both use the numeric
+NPZ/JSON storage format. No external weights are imported.
 
 ### Evaluation
 
@@ -384,6 +556,24 @@ Loading returns a model in evaluation mode. No external weights are imported.
 loss, perplexity, and the evaluated token count. Batches contain inputs and
 next-token targets; ignored targets are excluded. Evaluation restores the
 previous module modes. Use held-out data to measure generalization.
+
+For example, evaluate local next-token batches:
+
+```python
+import tensorforge as tf
+from tensorforge.models import CausalLanguageModel, LanguageModelConfig
+from tensorforge.text import CharacterTokenizer, TextDataset
+from tensorforge.data import DataLoader
+
+tokenizer = CharacterTokenizer("hello ")
+dataset = TextDataset(tokenizer.encode("hello " * 8), sequence_length=8)
+model = CausalLanguageModel(LanguageModelConfig(tokenizer.vocab_size))
+metrics = tf.evaluation.evaluate_language_model(model, DataLoader(dataset, batch_size=2))
+print(metrics)  # loss, perplexity, and number of non-ignored target tokens
+```
+
+This untrained-model example demonstrates the API; supply a trained model and
+held-out data when measuring model quality.
 
 `evaluation.classification_accuracy(logits, targets)` reports the fraction of
 correct predictions. `evaluation.evaluating(model)` temporarily enables
@@ -440,6 +630,8 @@ Do not apply softmax before cross-entropy.
 
 ```python
 import numpy as np
+import tensorforge as tf
+from tensorforge import nn
 
 labels = tf.tensor([0, 1, 0], dtype=np.int64)
 criterion = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.1)
@@ -465,7 +657,8 @@ feature axis. BatchNorm1d accepts `(N,C)`/`(N,C,L)`; BatchNorm2d accepts NCHW.
 | `text` | `CharacterTokenizer`, `BytePairTokenizer`, `TextDataset` |
 | `evaluation` | `evaluating`, `evaluate_language_model`, `classification_accuracy` |
 | `pretrained` | `save_pretrained`, `from_pretrained` for native causal-model bundles |
-| `models` | `LanguageModelConfig`, `CausalLanguageModel` |
+| `models` | `LanguageModelConfig`, `CausalLanguageModel` with `forward`, `hidden_states`, and `generate` |
+| `serialization` | `save(state, path)`, `load(path)` (also exported at package level) |
 
 SGD supports momentum. SGD and Adam use L2 weight penalties; AdamW uses
 decoupled weight decay. Optimizers accept a flat collection of trainable leaf
@@ -474,7 +667,8 @@ tensors, not parameter groups.
 ## Testing and packaging
 
 ```bash
-python -m pytest
+# Limit CPU threads for predictable performance on the small test workloads.
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m pytest
 python -m ruff check .
 python -m ruff format --check .
 python -m pip check
@@ -522,10 +716,12 @@ finite-difference tests. They validate the tested configurations; modern
 RoPE/grouped-query models and cached generation are not covered by this
 reference suite.
 
-A project-description bullet supported by these tests is:
+Local verification on **2026-10-13**, using Python 3.11.8 and PyTorch
+2.14.1+cpu, passed **178 tests**, including **30 PyTorch reference cases**.
+Lint, formatting, and package checks also passed. These are local results;
+the workflow badge shows remote CI status.
 
-> Validated forward outputs, losses, and backward gradients against equivalent
-> PyTorch reference implementations, including RNN/LSTM/GRU and a GPT-style model.
+### Package builds
 
 Build outputs:
 
@@ -541,8 +737,9 @@ tests. Install the wheel in another environment with:
 python -m pip install /absolute/path/to/dist/tensorforge-0.3.0-py3-none-any.whl
 ```
 
-GitHub Actions checks Python 3.10, 3.11, and 3.12. Local verification results
-and remote CI status are distinct; the badge links to the actual workflow.
+GitHub Actions runs core tests, lint, formatting, builds, and an installed-wheel
+check on Python 3.10, 3.11, and 3.12. A separate Python 3.11 job installs CPU
+PyTorch and runs the reference suite.
 
 ## Project layout
 
@@ -565,7 +762,7 @@ tensorforge/
   evaluation.py      Language loss, perplexity, and accuracy
   serialization.py   Portable state files
 examples/            Numbered runnable examples
-tests/               Automated checks
+tests/               Core checks, example workflows, and PyTorch references
 .github/workflows/   Continuous integration
 ```
 
