@@ -490,6 +490,43 @@ examples. To see output from successful examples:
 python -m pytest tests/test_examples.py -rP
 ```
 
+### PyTorch reference comparisons
+
+The optional reference suite compares TensorForge with native PyTorch layers
+and an equivalent GPT-style model assembled from PyTorch components. Install
+the CPU reference dependency and run it with:
+
+```bash
+python -m pip install 'torch>=2.5,<3' --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e '.[dev,reference]'
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m pytest tests/test_pytorch_reference.py -v
+```
+
+Comparisons use identical inputs and copied weights on CPU in float64, with
+dropout disabled and matching layer settings. Tests check forward outputs,
+losses, input and initial-state gradients, and corresponding parameter
+gradients using `atol=1e-10` and `rtol=1e-8`. SGD with momentum, Adam, and AdamW
+are also compared over four training updates with weight decay.
+
+Coverage includes broadcasted matrix multiplication and reductions, seven
+activations, Linear/LayerNorm networks, repeated-ID embeddings, convolution
+and pooling, RNN/LSTM/GRU, self/causal/cross-attention, a Transformer encoder
+block, and a two-layer GPT-style model with tied embeddings. Loss tests cover
+MSE, binary cross-entropy, and cross-entropy with extreme logits, ignored
+targets, label smoothing, and different reductions.
+
+PyTorch is a test dependency only; the library still runs with NumPy alone.
+Without PyTorch this module is skipped; a dedicated CI job installs CPU
+PyTorch and runs the comparisons. These checks supplement the independent
+finite-difference tests. They validate the tested configurations; modern
+RoPE/grouped-query models and cached generation are not covered by this
+reference suite.
+
+A project-description bullet supported by these tests is:
+
+> Validated forward outputs, losses, and backward gradients against equivalent
+> PyTorch reference implementations, including RNN/LSTM/GRU and a GPT-style model.
+
 Build outputs:
 
 ```text

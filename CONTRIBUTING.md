@@ -16,6 +16,20 @@ python -m build
 git diff --check
 ```
 
+For comparisons against native PyTorch layers and the GPT-style reference,
+install CPU PyTorch and the optional reference extra:
+
+```bash
+python -m pip install 'torch>=2.5,<3' --index-url https://download.pytorch.org/whl/cpu
+python -m pip install -e '.[dev,reference]'
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m pytest tests/test_pytorch_reference.py -v
+```
+
+Match float64 inputs, weights, loss reductions, and layer settings. Keep
+dropout disabled and compare input/state and parameter gradients as well as
+outputs. PyTorch remains optional outside the dedicated reference CI job;
+retain independent finite-difference checks for derivatives.
+
 Before submitting a change:
 
 - Test expected values independently of the implementation.

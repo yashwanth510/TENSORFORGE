@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added optional CPU float64 PyTorch reference tests for core operations,
+  activations, dense/CNN/recurrent networks, attention, a Transformer block,
+  and a GPT-style model; compare outputs, losses, and backward gradients.
+- Compare SGD, Adam, and AdamW parameters over multiple training updates.
+- Added a dedicated reference-test CI job and documented reproducible commands.
+- PyTorch is optional test tooling; runtime dependencies remain NumPy only.
+
 ## 0.3.0 — 2026-10-12
 
 - Focused the library on tensors/autograd, dense and convolutional networks,
